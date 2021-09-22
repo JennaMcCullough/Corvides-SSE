@@ -1,0 +1,318 @@
+################################################################################
+#
+# GeoHiSSE: Bayesian inference of diversification rates under a
+#                    Geograhpical SSE with hidden states (GeoSSE with extirpation as Fig 3. Caetano et al 2018)
+# Authors: Jenna McCullough and Rosana Zenil-Ferguson
+# Last updated: 21/9/2021
+#
+################################################################################
+# code to start multi processor version of mpi: 
+# mpirun -np 4 ./rb
+
+setOption("useScaling","true")
+NUM_STATES := 6
+#######################
+# Reading in the Data #
+#######################
+
+# Get the tree
+observed_phylogeny <- readTrees("data/corvides.719.tre")[1]
+
+# Read biogeographic range data. The areas are represented as the
+# following character states:
+# 0 = 01 = Widespread A = Rev code this is 1
+# 1 = 0 =  continents A = Rev code this is 2
+# 2 = 1 =  islands  A  = Rev code this is 3
+# 3 = 01 = Widespread B = Rev code this is 4
+# 4 = 0 =  continents B = Rev code this is 5
+# 5 = 1 =  islands  B  = Rev code this is 6
+
+data = readCharacterDataDelimited("data/02_biogeo-islands-v-continents.txt", stateLabels ="012", type="NaturalNumbers", delimiter="\t", headers=TRUE)
+
+taxa <- observed_phylogeny.taxa()
+data_exp <- data.expandCharacters(2) 
+
+# set the move and monitor indices
+mvi = 0
+mni = 0
+
+###############################
+# Set up the extinction rates #
+###############################
+
+#Log-normals for all
+num_species <- 832 # Number of extant lineages is 832. we have data for 719
+rate_mean <- ln( ln(num_species/2.0) / observed_phylogeny.rootAge() )
+rate_sd <- 1.0
+
+##### Extinction rates
+# extinction vector starts at 1 but my data starts at 0
+
+extinction_rates[1] <- 0.0 # no extinction for  01 because that would require a two step which is not good for Markov chains
+extinction_rates[2] ~ dnLognormal(rate_mean, rate_sd) # extinction for 0 x_0
+extinction_rates[3] ~ dnLognormal(rate_mean, rate_sd) # extinction for 1 x_1
+extinction_rates[4] <- 0.0 # no extinction for  01 because that would require a two step which is not good for Markov chains
+extinction_rates[5] ~ dnLognormal(rate_mean, rate_sd) # extinction for 3 x_3
+extinction_rates[6] ~ dnLognormal(rate_mean, rate_sd) # extinction for 4 x_4
+
+# Note Rev vectors are indexed starting with 1 so that's where the disconnect with data happens
+
+# add MCMC moves for each extinction rate
+moves[++mvi] = mvSlide( extinction_rates[2], weight=4 )
+moves[++mvi] = mvSlide( extinction_rates[3], weight=4 )
+moves[++mvi] = mvSlide( extinction_rates[5], weight=4 )
+moves[++mvi] = mvSlide( extinction_rates[6], weight=4 )
+
+# Let's also create a deterministic variable to monitor the overall extinction rate
+total_extinction := sum(extinction_rates)
+
+
+################################################
+# Set up the anagenetic transition rate matrix #
+################################################
+# following character states:
+# 0 = 01 = Widespread A = Rev code this is 1
+# 1 = 0 =  continents A = Rev code this is 2
+# 2 = 1 =  islands  A  = Rev code this is 3
+# 3 = 01 = Widespread B = Rev code this is 4
+# 4 = 0 =  continents B = Rev code this is 5
+# 5 = 1 =  islands  B  = Rev code this is 6
+
+# First, let's create the rates of anagenetic dispersal:
+anagenetic_dispersal_21 ~ dnLognormal(rate_mean, rate_sd) # disperse from 0 to 01 A (d_0 rate in Caetano et al. 2018) continent to widesprad 
+anagenetic_dispersal_31 ~ dnLognormal(rate_mean, rate_sd) # disperse from 1 to 01 A (d_1 rate in Caetano et al. 2018) 
+anagenetic_dispersal_54 ~ dnLognormal(rate_mean, rate_sd) # disperse from 0 to 01 B (d_0 rate in Caetano et al. 2018)
+anagenetic_dispersal_64 ~ dnLognormal(rate_mean, rate_sd) # disperse from 1 to 01 B (d_1 rate in Caetano et al. 2018
+
+# and add MCMC moves for each anagenetic dispersal rate
+moves[++mvi] = mvSlide( anagenetic_dispersal_21, weight=4 )
+moves[++mvi] = mvSlide( anagenetic_dispersal_31, weight=4 )
+moves[++mvi] = mvSlide( anagenetic_dispersal_54, weight=4 )
+moves[++mvi] = mvSlide( anagenetic_dispersal_64, weight=4 )
+
+# rates between hidden rates 
+# A to B
+hidden_rate_1 ~ dnLognormal(rate_mean, rate_sd)
+# B to A 
+hidden_rate_2 ~ dnLognormal(rate_mean, rate_sd)
+moves[++mvi] = mvSlide( hidden_rate_2, weight=4 )
+moves[++mvi] = mvSlide( hidden_rate_1, weight=4 )
+
+
+
+# The anagenetic transitions will be stored in a
+# instantaneous rate matrix.
+# initalizing all rates to 0.0:
+for (i in 1:6) {
+    for (j in 1:6) {
+        r[i][j] <- 0.0
+    }
+}
+
+# Now we can populate non-zero rates into the anagenetic transition rate matrix:
+r[2][1] := anagenetic_dispersal_21
+r[3][1] := anagenetic_dispersal_31
+r[5][4] := anagenetic_dispersal_54
+r[6][4] := anagenetic_dispersal_64
+r[1][2] := extinction_rates[3] #here big assumption is that going from 01 to 0 A implies extinction of 1 A (x_1 rate)
+r[1][3] := extinction_rates[2] #here big assumption is that going from 01 to 1 A implies extinction of 0 A (x_0 rate)
+r[4][5] := extinction_rates[6] #here big assumption is that going from 01 to 0 B implies extinction of 1 B (x_1 rate)
+r[4][6] := extinction_rates[5] #here big assumption is that going from 01 to 1 B implies extinction of 0 B (x_0 rate)
+
+# these are the transitions between A and B states for all the states (continent, widespread, island)
+r[1][4] :=  hidden_rate_1  # q(01A) -> q(01B)
+r[2][5] :=  hidden_rate_1  # q(0A) -> q(0B)
+r[3][6] :=  hidden_rate_1  # q(1A) -> q(1B)
+r[4][1] :=  hidden_rate_2  # q(01B) -> q(01A)
+r[5][2] :=  hidden_rate_2  # q(0B) -> q(0A)
+r[6][3] :=  hidden_rate_2  # q(1B) -> q(1A)
+
+# Now we pass our vector of vectors into the fnFreeK function to create
+# the instaneous rate matrix.
+ana_rate_matrix := fnFreeK(r, rescaled=false)
+
+##################################################
+# Set up the cladogenetic speciation rate matrix #
+##################################################
+
+# character states:
+# 0 = 01 = Widespread A = Rev code this is 1 = for cladogenetic events only this is 0
+# 1 = 0 =  continents A = Rev code this is 2 = for cladogenetic events only this is 1
+# 2 = 1 =  islands   A  = Rev code this is 3 = for cladogenetic events only this is 2
+# 0 = 01 = Widespread B = Rev code this is 4 = for cladogenetic events only this is 3
+# 1 = 0 =  continents B = Rev code this is 5 = for cladogenetic events only this is 4
+# 2 = 1 =  islands  B   = Rev code this is 6 = for cladogenetic events only this is 5
+
+# Here we need to define each cladogenetic event type in the form
+# [ancestor_state, daughter1_state, daughter2_state]
+# and assign each cladogenetic event type a corresponding
+# speciation rate.
+
+#this is where the extended model differs from true GeoHiSSE, 
+#allowing the different types of speciation to have different rates 
+
+
+# 1. Widespread sympatry. The first type of cladogenetic event we’ll specify is 
+# widespread sympatry. Widespread sympatric cladogenesis is where the biogeographic
+#  range does not change; that is the daughter lineages inherit the same range
+#  as the ancestor. this does not allow for the speciation event (following Caetano et al. 2018):   
+#           widespread -> widespread, widespread 
+# Define the widespread sympatric cladogenetic events this are plain speciations in states 0 and 1
+clado_events[1] =  [1, 1, 1] # 0A -> 0A, 0A
+clado_events[2] =  [2, 2, 2] # 1A -> 1A, 1A
+clado_events[9] =  [4, 4, 4] # 0B -> 0B, 0B
+clado_events[10] = [5, 5, 5] # 1B -> 1B, 1B
+
+# and create and assign each its own speciation rate 
+speciation_1 ~ dnLognormal(rate_mean, rate_sd) # specifically for Continent A -> continent A, continent A
+moves[++mvi] = mvSlide( speciation_1, weight=2 )
+speciation_rates[1] := speciation_1 #(s_0A rate)
+
+speciation_2 ~ dnLognormal(rate_mean, rate_sd) # specifically for Island A-> island A, island A
+moves[++mvi] = mvSlide( speciation_2, weight=2 )
+speciation_rates[2] := speciation_2 #(s_1A rate)
+
+speciation_9 ~ dnLognormal(rate_mean, rate_sd) # specifically for Continent B -> continent B, continent B
+moves[++mvi] = mvSlide( speciation_9, weight=2 )
+speciation_rates[9] := speciation_9 #(s_0B rate)
+
+speciation_10 ~ dnLognormal(rate_mean, rate_sd) # specifically for Island B-> island B, island B
+moves[++mvi] = mvSlide( speciation_10, weight=2 )
+speciation_rates[10] := speciation_10 #(s_1B rate)
+
+# 2. Subset sympatry. This is the second type of cladogenetic event. This is where
+# one daughter lineage inherits the full ancestral range but the other lineage
+# inherits only a single region. This only occurs from a widespread lineage. 
+# there are two of each because it can be left right or right left lineages
+
+# Define the subset sympatric cladogenetic events
+clado_events[3] = [0, 0, 1] # 01A -> 01A, 0A
+clado_events[4] = [0, 1, 0] # 01A -> 0A, 01A
+clado_events[5] = [0, 0, 2] # 01A -> 01A, 1A
+clado_events[6] = [0, 2, 0] # 01A -> 1A, 01A
+clado_events[11] = [3, 3, 4] # 01B -> 01B, 0B
+clado_events[12] = [3, 4, 3] # 01B -> 0B, 01B
+clado_events[13] = [3, 3, 5] # 01B -> 01B, 1B
+clado_events[14] = [3, 5, 3] # 01B -> 1B, 01B
+
+#create and assign speciation rates
+
+speciation_3 ~ dnLognormal(rate_mean, rate_sd) # specifically for widespread A -> widespread A, continents A (and vice versa)
+moves[++mvi] = mvSlide( speciation_3, weight=2 )
+speciation_rates[3] := speciation_3/2  #(s_0A rate)
+speciation_rates[4] := speciation_3/2 # (s_0A rate)
+
+speciation_5 ~ dnLognormal(rate_mean, rate_sd) # specifically for widespread A -> widespread A, island A (and vice versa)
+moves[++mvi] = mvSlide( speciation_5, weight=2 )
+speciation_rates[5] := speciation_5/2 # (s_1A rate)
+speciation_rates[6] := speciation_5/2 # (s_1A rate)
+
+speciation_11 ~ dnLognormal(rate_mean, rate_sd) # specifically for widespread B -> widespread B, continents B (and vice versa)
+moves[++mvi] = mvSlide( speciation_11, weight=2 )
+speciation_rates[11] := speciation_11/2  #(s_0B rate)
+speciation_rates[12] := speciation_11/2 # (s_0B rate)
+
+speciation_13 ~ dnLognormal(rate_mean, rate_sd) # specifically for widespread B -> widespread B, islands B (and vice versa)
+moves[++mvi] = mvSlide( speciation_13, weight=2 )
+speciation_rates[13] := speciation_13/2 # (s_1B rate)
+speciation_rates[14] := speciation_13/2 # (s_1B rate)
+
+# 3. Allopatric cladogenesis. This is when the two daughter lineages split the range: 
+# widespread -> island, continent 
+
+# Define the allopatric events:
+clado_events[7] = [0, 1, 2]  # 01A -> 0A, 1A
+clado_events[8] = [0, 2, 1]  # 01A -> 1A, 0A
+clado_events[15] = [3, 4, 5] # 01B -> 0B, 1B
+clado_events[16] = [3, 5, 4] # 01B -> 1B, 0B
+
+#Speciation allopatry was the same in GEOHISSE. Here, we separate out A and B 
+speciation_7 ~ dnLognormal(rate_mean, rate_sd)
+moves[++mvi] = mvSlide( speciation_7, weight=4 )
+
+speciation_rates[7] := speciation_7/2 # (s_01 A rate)
+speciation_rates[8] := speciation_7/2 # (s_01 A rate)
+
+speciation_15 ~ dnLognormal(rate_mean, rate_sd)
+moves[++mvi] = mvSlide( speciation_7, weight=4 )
+speciation_rates[15] := speciation_7/2 # (s_01 B rate)
+speciation_rates[16] := speciation_7/2 # (s_01 B rate)
+
+# Now let's create a deterministic variable to monitor the overall speciation rate
+total_speciation := sum(speciation_rates)
+
+# The cladogenetic speciation rate
+# matrix from the cladogenetic event types and the speciation rates
+clado_matrix := fnCladogeneticSpeciationRateMatrix(clado_events, speciation_rates, 6)
+
+# Print clado_matrix
+clado_matrix
+ 
+########################################################################
+# Set up the cladogenetic character state dependent birth death process #
+#########################################################################
+
+# For simplicity we will fix the root frequences to be equal except for the null state
+# which has probability of 0.
+root_frequencies ~ dnDirichlet( rep(1,NUM_STATES) )
+moves[++mvi] = mvDirichletSimplex(root_frequencies,tune=true,weight=2)
+
+# rho is the probability of sampling species at the present
+rho <- observed_phylogeny.ntips()/num_species
+
+# Now we construct a stochastic variable drawn from the cladogenetic
+# character state dependent birth death process (more commonly
+# called geohisse):
+geohisse ~ dnCDBDP( rootAge         = observed_phylogeny.rootAge(),
+                  cladoEventMap   = clado_matrix,
+                  extinctionRates = extinction_rates,
+                  Q               = ana_rate_matrix,
+                  delta           = 1.0,
+                  pi              = root_frequencies,
+                  rho             = rho,
+                  condition       = "time" )
+
+
+# clamp the model with the observed data
+geohisse.clamp( observed_phylogeny )
+geohisse.clampCharData( data_exp )
+
+
+
+#############
+# The Model #
+#############
+
+# workspace model wrapper
+mymodel = model(geohisse)
+
+# set up the monitors that will output parameter values to file and screen
+monitors[++mni] = mnModel(filename="output/corvoides_geohisse-extended-v1.log", printgen=1)
+monitors[++mni] = mnScreen(printgen=1, speciation_rates, extinction_rates)
+
+# if I wanted to do ancestral state reconstruction, I would run this. But I didn't because this would take a long time and it isn't a part of my question  
+#monitors[++mni] = mnJointConditionalAncestralState(tree=observed_phylogeny, cdbdp=classe, type="NaturalNumbers", printgen=1, withTips=true, withStartStates=true, filename="output/anc_states_corvoides_ClaSSE.log")
+
+
+################
+# The Analysis #
+################
+
+# workspace mcmc
+mymcmc = mcmc(mymodel, monitors, moves)
+
+# pre-burnin to tune the proposals. I will remove burnin with logcombiner
+#mymcmc.burnin(generations=300,tuningInterval=5)
+
+# run the MCMC, to manually parallelize this analysis, run multiple separate analyses and combine with Logcombiner
+mymcmc.run(generations=100000)
+
+
+##############################
+# Summarize ancestral states #
+##############################
+# Don't do this if you didn't do the mnJointConditionalAncestralState command above 
+#anc_states = readAncestralStateTrace("output/anc_states_corvoides_geosse.log")
+#anc_tree = ancestralStateTree(tree=observed_phylogeny, ancestral_state_trace_vector=anc_states, include_start_states=true, file="output/anc_states_corvoides_geosse_results.tree", burnin=0, summary_statistic="MAP", site=0)
+
+q()
