@@ -1,0 +1,217 @@
+#########################################################################################################
+#
+# MuSSE- East and West of Wallace's line X Islands v. continents 
+#
+# authors: Rosana Zenil-Ferguson and Jenna McCullough
+# last modified: 05/03/2021
+#########################################################################################################
+#######################
+# Reading in the Data #
+#######################
+# 0 = Island East
+# 1 = Continent East
+# 2 = Island West  
+# 3 = Continent West
+
+# how to code widespread species
+## Species_A comes from Continent East and Island West (1 2)
+## species_B is on both continents and islands AND both sides of line (0 1 2 3)
+## species_C is widespread on islands/continents east of wallace's line (0 1)
+
+setOption("useScaling","true")
+NUM_STATES = 4
+### Read in the data
+
+observed_phylogeny <- readTrees("corvides.720.no-outgroups.tre")[1]
+
+data <- readCharacterDataDelimited("corvides-musse-wallace_X_line.txt",stateLabels=4,type="NaturalNumbers",delimiter="\t",headers=TRUE)
+
+# Get some useful variables from the data. We need these later on.
+taxa <- observed_phylogeny.taxa()
+
+# set my move index
+mvi = 0
+mni = 0
+
+H = 0.587405
+
+####################
+# Create the rates #
+####################
+
+### Specify a prior on the diversification and turnover rate
+
+### Create the constant prior parameters of the diversification rates
+## Number of surviving lineages is 719
+rate_mean <- ln( ln(719/2.0) / observed_phylogeny.rootAge() )
+rate_sd <- 2*H
+
+for (i in 1:NUM_STATES) {
+
+### Create a lognormal distributed variable for the diversification rate
+log_speciation[i] ~ dnNormal(mean=rate_mean,sd=rate_sd)
+speciation[i] := exp( log_speciation[i] )
+moves[++mvi] = mvSlide(log_speciation[i],delta=0.20,tune=true,weight=3.0)
+#moves[++mvi] = mvScale(log_speciation[i],lambda=0.20,tune=true,weight=3.0)
+
+### Create a lognormal distributed variable for the turnover rate
+log_extinction[i] ~ dnNormal(mean=rate_mean,sd=rate_sd)
+extinction[i] := exp( log_extinction[i] )
+moves[++mvi] = mvSlide(log_extinction[i],delta=0.20,tune=true,weight=3)
+#moves[++mvi] = mvScale(log_extinction[i],lambda=0.20,tune=true,weight=3.0)
+}
+
+
+
+#########################################################
+# Set up the transition rate matrix for observed states #
+#########################################################
+## I defined very loosely my gamma priors for rates in the Q-mat
+shape_pr := 0.5
+#rate_pr := 1
+############### Alternative definition or rate parameter
+# Each transition rate between observed states are drawn
+# from an exponential distribution with a mean of 10
+# character state transitions over the tree.
+ rate_pr := observed_phylogeny.treeLength()/10
+# 0 = Island East
+# 1 = Continent East
+# 2 = Island West
+# 3 = Continent West
+
+rate_01 ~ dnGamma(shape=shape_pr, rate=rate_pr) # East Island to Continent
+rate_10 ~ dnGamma(shape=shape_pr, rate=rate_pr) # East Continent to Island
+
+rate_03 ~ dnGamma(shape=shape_pr, rate=rate_pr) # Island East to West
+rate_30 ~ dnGamma(shape=shape_pr, rate=rate_pr) # Island West to East
+
+rate_02 ~ dnGamma(shape=shape_pr, rate=rate_pr) # Island East to Continent West
+rate_20 ~ dnGamma(shape=shape_pr, rate=rate_pr) # Continent West to Island East
+
+rate_12 ~ dnGamma(shape=shape_pr, rate=rate_pr) # Continent East to West
+rate_21 ~ dnGamma(shape=shape_pr, rate=rate_pr) # Continent West to East
+
+rate_13 ~ dnGamma(shape=shape_pr, rate=rate_pr) # Continent East to Island West
+rate_31 ~ dnGamma(shape=shape_pr, rate=rate_pr) # Island West to Continent East
+
+rate_23 ~ dnGamma(shape=shape_pr, rate=rate_pr) # Continent West to Island West
+rate_32 ~ dnGamma(shape=shape_pr, rate=rate_pr) # West Island to Continent
+
+moves[++mvi] = mvScale( rate_01, weight=2 )
+moves[++mvi] = mvScale( rate_10, weight=2 )
+moves[++mvi] = mvScale( rate_03, weight=2 )
+moves[++mvi] = mvScale( rate_30, weight=2 )
+moves[++mvi] = mvScale( rate_02, weight=2 )
+moves[++mvi] = mvScale( rate_20, weight=2 )
+moves[++mvi] = mvScale( rate_12, weight=2 )
+moves[++mvi] = mvScale( rate_21, weight=2 )
+moves[++mvi] = mvScale( rate_13, weight=2 )
+moves[++mvi] = mvScale( rate_31, weight=2 )
+moves[++mvi] = mvScale( rate_23, weight=2 )
+moves[++mvi] = mvScale( rate_32, weight=2 )
+
+
+######################################################################
+# Create the rate matrix for the combined observed and hidden states #
+######################################################################
+# first initialize the matrix with all zeros:
+for (i in 1:4) {
+for (j in 1:4) {
+q[i][j] := 0.0
+}
+}
+q[1][2] := rate_01
+q[2][1] := rate_10
+q[1][4] := rate_03
+q[4][1] := rate_30
+q[1][3] := rate_02
+q[3][1] := rate_20
+q[2][3] := rate_12
+q[3][2] := rate_21
+q[2][4] := rate_13
+q[4][2] := rate_31
+q[3][4] := rate_23
+q[4][3] := rate_32
+
+
+# generate the actual matrix
+rate_matrix := fnFreeK(q, rescaled=false, matrixExponentialMethod="scalingAndSquaring")
+
+#####################################
+# Set up the root state frequencies #
+# We're going to estimate them and not set them up#
+#####################################
+
+### Create a constant variable with the prior probabilities of each rate category at the root.
+rate_category_prior ~ dnDirichlet( rep(1,NUM_STATES) )
+moves[++mvi] = mvDirichletSimplex(rate_category_prior,tune=true,weight=2)
+
+
+### Create the fix parameter for the age of the root set to the observed age
+root <- observed_phylogeny.rootAge()
+
+### I did not add any sampling of species but it is posible by setting this rho parameter
+### rho is the probability of sampling species at the present
+### fix this
+rho <- 719/832
+
+
+####################################################################
+# Building the BiSSE Model as discrete character model+ BD process#
+###################################################################
+
+### Here is where I tie speciation, extinction, and Q using a Birth-Death with categories
+timetree ~ dnCDBDP( rootAge           = root,
+speciationRates   = speciation,
+extinctionRates   = extinction,
+Q                 = rate_matrix,
+pi                = rate_category_prior,
+rho               = rho,
+delta             = 1.0,
+condition         = "time" )
+
+### clamp the model with the "observed" tree
+timetree.clamp( observed_phylogeny )
+timetree.clampCharData( data )
+
+
+
+#############
+# The Model #
+#############
+
+
+### workspace model wrapper ###
+mymodel = model(rate_matrix)
+
+### set up the monitors that will output parameter values to file and screen
+monitors[++mni] = mnModel(filename="musse_wallace_island.log", printgen=1)
+#monitors[++mni] = mnJointConditionalAncestralState(tree=timetree, cdbdp=timetree, type="NaturalNumbers", printgen=1000, withTips=true, withStartStates=false, filename="ancrecon_musse_wallace_island.log")
+monitors[++mni] = mnScreen(printgen=1, rate_01, rate_23, speciation, extinction)
+
+
+################
+# The Analysis #
+################
+
+### workspace mcmc
+mymcmc = mcmc(mymodel, monitors, moves, nruns=1, moveschedule="random")
+
+### pre-burnin to tune the proposals 20% of the sample
+#mymcmc.burnin(generations=2000,tuningInterval=100)
+
+### run the MCMC
+mymcmc.run(generations=120000)
+
+##############################
+# Summarize ancestral states #
+##############################
+
+
+#anc_states = readAncestralStateTrace("/home/eeg/shared/twostatesse/bissesi/output/anc_states_BiSSE_selfincomp250K.log")
+#anc_tree = ancestralStateTree(tree=observed_phylogeny, ancestral_state_trace_vector=anc_states, include_start_states=false, file="/home/eeg/shared/twostatesse/bissesi/output/anc_states_summaryBiSSEselfincomp250K.tree", burnin=0, summary_statistic="MAP", site=0)
+
+q()
+
+
+
