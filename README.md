@@ -1,5 +1,9 @@
 # Corvides-SSE
-RevBayes code used in McCullough et al. (in prep) soon to be submitted to Systematic Biology 
+RevBayes code used in McCullough et al. 2022, "Wallacean and Melanesian Islands Promote Higher Rates of Diversification within the Global Passerine radiation Corvides" 
+
+See link for publisher's website: 
+https://academic.oup.com/sysbio/advance-article-abstract/doi/10.1093/sysbio/syac044/6608712?redirectedFrom=fulltext
+
 
 Methods for this study relating to this repository are below: 
 
