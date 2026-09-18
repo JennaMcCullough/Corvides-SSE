@@ -4,6 +4,8 @@ RevBayes code used in McCullough et al. 2022, "Wallacean and Melanesian Islands 
 See link for publisher's website: 
 https://academic.oup.com/sysbio/advance-article-abstract/doi/10.1093/sysbio/syac044/6608712?redirectedFrom=fulltext
 
+Supplemental figures and tables for this study are available here: 
+https://zenodo.org/records/7217480 
 
 This repository holds RevBayes code for the six analyses: 
 
